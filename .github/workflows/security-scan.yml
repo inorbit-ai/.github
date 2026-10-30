@@ -2,9 +2,17 @@
 # Gitleaks (secrets), the same scanners the inorbit/inorbit monorepo runs in GitLab CI
 # (.gitlab/ci/security.gitlab-ci.yml there).
 #
-# Report-only: findings never fail the calling workflow; a scanner that crashes does. Results
-# are in the job summary and in the `security-reports` artifact. Code scanning alerts in the
-# GitHub Security tab need GitHub Advanced Security, which the org does not have.
+# Report-only: findings never fail the calling workflow; a scanner that crashes does. Each run
+# writes a summary to the job page and uploads the `security-reports` artifact: one HTML report
+# for all scanners (security-report.html, from Microsoft's sarif-tools) and the SARIF files.
+# Code scanning alerts in the GitHub Security tab need GitHub Advanced Security, which the org
+# does not have; the SARIF files are what that tab would read.
+#
+# Versions: the scanner images and sarif-tools are pinned. Trivy downloads its vulnerability
+# database and Semgrep its rules on every run, so new advisories and rules arrive without a
+# version bump; Gitleaks' rules ship in its binary. Dependabot cannot bump these (they are not
+# `uses:` references): review them every quarter. The actions are pinned to commit SHAs and
+# Dependabot bumps them (.github/dependabot.yml).
 #
 # Call it from a repository with .github/workflows/security.yml:
 #
@@ -38,53 +46,40 @@ jobs:
       # scanners' caches.
       DOCKER_RUN: docker run --rm --user 1001:1001 -e HOME=/tmp -v ${{ github.workspace }}:/src -w /src
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Gitleaks scans the history, not only the last commit.
           fetch-depth: 0
 
       - name: Semgrep (SAST)
-        run: $DOCKER_RUN semgrep/semgrep:1.181.0 semgrep scan --config p/default --metrics=off --json --output semgrep.json
+        run: $DOCKER_RUN semgrep/semgrep:1.181.0 semgrep scan --config p/default --metrics=off --sarif --output semgrep.sarif
 
       - name: Trivy (dependencies)
-        run: $DOCKER_RUN aquasec/trivy:0.76.0 fs --scanners vuln --format json --output trivy.json --exit-code 0 .
+        run: $DOCKER_RUN aquasec/trivy:0.76.0 fs --scanners vuln --format sarif --output trivy.sarif --exit-code 0 .
 
       - name: Gitleaks (secrets)
         # --redact keeps secret values out of the report and the job log.
-        run: $DOCKER_RUN zricethezav/gitleaks:v8.30.1 git --redact --report-format json --report-path gitleaks.json --exit-code 0 .
+        run: $DOCKER_RUN zricethezav/gitleaks:v8.30.1 git --redact --report-format sarif --report-path gitleaks.sarif --exit-code 0 .
 
-      - name: Summary
+      - name: Report
         run: |
-          python3 - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          """Write finding counts per scanner and severity to the job summary."""
-          import collections
-          import json
+          pipx run --spec sarif-tools==3.0.5 sarif html -o security-report.html semgrep.sarif trivy.sarif gitleaks.sarif
+          {
+            echo '## Security scan'
+            echo '```'
+            pipx run --spec sarif-tools==3.0.5 sarif summary semgrep.sarif trivy.sarif gitleaks.sarif
+            echo '```'
+            echo 'Full report: `security-report.html` in the `security-reports` artifact of this run.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          semgrep = collections.Counter(r["extra"]["severity"] for r in json.load(open("semgrep.json"))["results"])
-          trivy = collections.Counter(
-              v["Severity"]
-              for result in json.load(open("trivy.json")).get("Results") or []
-              for v in result.get("Vulnerabilities") or []
-          )
-          secrets = len(json.load(open("gitleaks.json")) or [])
-
-          print("## Security scan")
-          print("| Scanner | Findings |")
-          print("|---|---|")
-          print(f"| Semgrep (SAST) | {dict(semgrep) or 0} |")
-          print(f"| Trivy (dependencies) | {dict(trivy) or 0} |")
-          print(f"| Gitleaks (secrets) | {secrets} |")
-          print()
-          print("Full reports: the `security-reports` artifact of this run.")
-          EOF
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: security-reports
           path: |
-            semgrep.json
-            trivy.json
-            gitleaks.json
+            security-report.html
+            semgrep.sarif
+            trivy.sarif
+            gitleaks.sarif
           if-no-files-found: warn
           retention-days: 90

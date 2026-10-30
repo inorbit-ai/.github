@@ -1,0 +1,9 @@
+# Keeps the actions in this repo's workflows current (they are pinned to commit SHAs). The
+# scanner images and sarif-tools in security-scan.yml are not `uses:` references, so Dependabot
+# cannot see them; they are reviewed every quarter.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
