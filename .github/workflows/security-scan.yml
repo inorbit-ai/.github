@@ -3,8 +3,9 @@
 # (.gitlab/ci/security.gitlab-ci.yml there).
 #
 # Report-only: findings never fail the calling workflow; a scanner that crashes does. Each run
-# writes a summary to the job page and uploads the `security-reports` artifact: one HTML report
-# for all scanners (security-report.html, from Microsoft's sarif-tools) and the SARIF files.
+# writes a summary to the job page with a link to one HTML report for all scanners
+# (security-report.html, from Microsoft's sarif-tools, uploaded unzipped), and uploads the SARIF
+# files as the `security-reports` artifact.
 # Code scanning alerts in the GitHub Security tab need GitHub Advanced Security, which the org
 # does not have; the SARIF files are what that tab would read.
 #
@@ -61,15 +62,29 @@ jobs:
         # --redact keeps secret values out of the report and the job log.
         run: $DOCKER_RUN zricethezav/gitleaks:v8.30.1 git --redact --report-format sarif --report-path gitleaks.sarif --exit-code 0 .
 
-      - name: Report
+      - name: HTML report
+        run: pipx run --spec sarif-tools==3.0.5 sarif html -o security-report.html semgrep.sarif trivy.sarif gitleaks.sarif
+
+      - name: Upload the HTML report
+        id: html-report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: security-report.html
+          # The file itself, not a zip, so it opens from the link in the job summary.
+          archive: false
+          retention-days: 90
+
+      - name: Summary
+        env:
+          REPORT_URL: ${{ steps.html-report.outputs.artifact-url }}
         run: |
-          pipx run --spec sarif-tools==3.0.5 sarif html -o security-report.html semgrep.sarif trivy.sarif gitleaks.sarif
           {
             echo '## Security scan'
+            echo "**[Open the HTML report]($REPORT_URL)**"
             echo '```'
             pipx run --spec sarif-tools==3.0.5 sarif summary semgrep.sarif trivy.sarif gitleaks.sarif
             echo '```'
-            echo 'Full report: `security-report.html` in the `security-reports` artifact of this run.'
+            echo 'The SARIF files are in the `security-reports` artifact of this run.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -77,7 +92,6 @@ jobs:
         with:
           name: security-reports
           path: |
-            security-report.html
             semgrep.sarif
             trivy.sarif
             gitleaks.sarif
