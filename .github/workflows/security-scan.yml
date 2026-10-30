@@ -1,0 +1,90 @@
+# Reusable security scan for InOrbit repositories: Semgrep (SAST), Trivy (dependencies) and
+# Gitleaks (secrets), the same scanners the inorbit/inorbit monorepo runs in GitLab CI
+# (.gitlab/ci/security.gitlab-ci.yml there).
+#
+# Report-only: findings never fail the calling workflow; a scanner that crashes does. Results
+# are in the job summary and in the `security-reports` artifact. Code scanning alerts in the
+# GitHub Security tab need GitHub Advanced Security, which the org does not have.
+#
+# Call it from a repository with .github/workflows/security.yml:
+#
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#     schedule:
+#       - cron: "0 7 * * 1"
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   jobs:
+#     scan:
+#       uses: inorbit-ai/.github/.github/workflows/security-scan.yml@main
+name: security-scan
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Run the scanner images as the runner user, so the mounted checkout is not "dubious
+      # ownership" to git and the reports are not root-owned. HOME must be writable for the
+      # scanners' caches.
+      DOCKER_RUN: docker run --rm --user 1001:1001 -e HOME=/tmp -v ${{ github.workspace }}:/src -w /src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Gitleaks scans the history, not only the last commit.
+          fetch-depth: 0
+
+      - name: Semgrep (SAST)
+        run: $DOCKER_RUN semgrep/semgrep:1.181.0 semgrep scan --config p/default --metrics=off --json --output semgrep.json
+
+      - name: Trivy (dependencies)
+        run: $DOCKER_RUN aquasec/trivy:0.76.0 fs --scanners vuln --format json --output trivy.json --exit-code 0 .
+
+      - name: Gitleaks (secrets)
+        # --redact keeps secret values out of the report and the job log.
+        run: $DOCKER_RUN zricethezav/gitleaks:v8.30.1 git --redact --report-format json --report-path gitleaks.json --exit-code 0 .
+
+      - name: Summary
+        run: |
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          """Write finding counts per scanner and severity to the job summary."""
+          import collections
+          import json
+
+          semgrep = collections.Counter(r["extra"]["severity"] for r in json.load(open("semgrep.json"))["results"])
+          trivy = collections.Counter(
+              v["Severity"]
+              for result in json.load(open("trivy.json")).get("Results") or []
+              for v in result.get("Vulnerabilities") or []
+          )
+          secrets = len(json.load(open("gitleaks.json")) or [])
+
+          print("## Security scan")
+          print("| Scanner | Findings |")
+          print("|---|---|")
+          print(f"| Semgrep (SAST) | {dict(semgrep) or 0} |")
+          print(f"| Trivy (dependencies) | {dict(trivy) or 0} |")
+          print(f"| Gitleaks (secrets) | {secrets} |")
+          print()
+          print("Full reports: the `security-reports` artifact of this run.")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            semgrep.json
+            trivy.json
+            gitleaks.json
+          if-no-files-found: warn
+          retention-days: 90
